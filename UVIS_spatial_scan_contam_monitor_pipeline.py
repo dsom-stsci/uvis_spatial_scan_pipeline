@@ -19,8 +19,13 @@ from multiprocessing import Pool
 from WFC3_phot_tools.spatial_scan.cr_reject import *
 from WFC3_phot_tools.spatial_scan.phot_tools import *
 from WFC3_phot_tools.data_tools.sort_data import *
+from WFC3_phot_tools.data_tools.get_wfc3_data_astroquery import *
 from WFC3_phot_tools.utils.UVIS_PAM import *
 from WFC3_phot_tools.utils.daophot_err import *
+
+from pyql.database.ql_database_interface import session
+from pyql.database.ql_database_interface import Master
+from pyql.database.ql_database_interface import UVIS_flt_0, UVIS_spt_0
 
 
 import warnings
@@ -31,7 +36,7 @@ warnings.filterwarnings("ignore")
 ###################################################################################### 
 DATA_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/data/scan_demo_data/' # directory that data should be sorted into 
 PHOT_TABLE_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/data/scan_demo_data/output/' # directory where catalogs should be output
-PROP_IDS = [15398, 15583, 14878, 16021] # list of proposal ids, used when downloading data.
+PROP_IDS = [15398] # list of proposal ids, used when downloading data.
 PAM_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/pixel_area_maps/' # directory containing pixel area maps
 AP_DIMENSIONS = [(36, 240)] # list of desired apertures (x dimension, y dimension) to use for aperture photometry 
 SKY_AP_DIMENSION = (75, 350) 
@@ -70,36 +75,34 @@ def _get_existing_filenames(data_dir, fits_file_type):
 
     return(bad_data_filenames + existing_data_filenames + new_data_filenames)
 
-def _retrieve_scan_data_ql(prop_id, fits_file_type, data_dir,
-                     ql_dir = '/grp/hst/wfc3a/*/'):
+def _retrieve_scan_data_astroquery(prop_id, fits_file_type, data_dir):
 
-	""" Copies spatial scan files from quicklook directories to `data_dir`/new.
-		Only copies files that aren't sorted into a subdirectory in `data_dir` 
-		already. """
+    """ Copies spatial scan files from quicklook directories to `data_dir`/new.
+        Only copies files that aren't sorted into a subdirectory in `data_dir` 
+        already. """
 
-	print('Retrieving data from proposal {}'.format(str(prop_id)))
+    print('Retrieving data from proposal {}'.format(str(prop_id)))
 
-	dest_dir = data_dir + 'new/'
-	dirr = ql_dir + str(prop_id)
-	#glob for files in all visit directories
-	files = glob.glob(dirr+'/*/*{}.fits'.format(fits_file_type))
+    results = session.query(Master.rootname).join(UVIS_flt_0).join(UVIS_spt_0).\
+              filter(UVIS_flt_0.proposid == prop_id).filter(UVIS_spt_0.scan_typ != 'N').all()
+    all_scan_rootnames = [item[0] for item in results]
+    
+    # now compare list against files already retrieved/sorted
+    existing_filenames = [os.path.basename(x)[0:9] for x in _get_existing_filenames(data_dir, fits_file_type)]
+    
+    # sometimes files have a 'j' or 's'. replace this with a q. i don't know why this is - failed obs?
+    new_file_rootnames =  [item[0:8] + 'q' for item in list(set(all_scan_rootnames) - set(existing_filenames))]
+    print(f'Found {len(new_file_rootnames)} un-ingested files in QL database.')
+    
+    # query astroquery
+    query_results = query_by_data_id(new_file_rootnames, file_type=fits_file_type)
+    
+    print(f'Found {len(query_results)} results in Astroquery. Downloading.')
 
-	scan_files = []
-	for f in files:
-	    scan_typ = fits.getval(f, 'SCAN_TYP')
-	    if scan_typ != 'N':
-	        scan_files.append(f)
+    # download data
+    download_products(query_results[0:5], output_dir=os.path.join(data_dir, 'new'))
 
-	#now compare list against files already retrieved/sorted
-	existing_filenames = _get_existing_filenames(data_dir, fits_file_type)
-	scan_file_basenames = [os.path.basename(x) for x in scan_files]
 
-	new_files = [scan_files[i] for i, x in enumerate(scan_file_basenames) if x not in existing_filenames]
-
-	print(f'{len(new_files)} new files to retrieve. Copying files to {dest_dir}.\n')
-
-	for f in new_files:
-	  shutil.copy(f, dest_dir+os.path.basename(f))
 
 def get_header_info(hdr, keywords=['rootname', 'proposid', 'date-obs', 
 								   'expstart', 'exptime', 'ccdamp', 'aperture', 
@@ -200,8 +203,8 @@ def _wrapper_make_phot_table(input_files, show_ap_plot, data_ext):
 
 	return phot_tab
 
-def main_process_scan_UVIS(get_new_data=False, sort_new_data=False,
-						   run_cr_reject=False, cr_reprocess=False,
+def main_process_scan_UVIS(get_new_data=False, sort_new_data=True,
+						   run_cr_reject=True, cr_reprocess=False,
 						   run_ap_phot=True, ap_phot_file_type = 'fcr',
 						   n_cores=20, process_objs='all',
 						   process_filts='all', show_ap_plot=False):
@@ -216,14 +219,12 @@ def main_process_scan_UVIS(get_new_data=False, sort_new_data=False,
 	if process_filts == 'all':
 		filtss=list(set([os.path.basename(x) for x in 
 					glob.glob(DATA_DIR + '/data/*/*')]))
-	print(filtss, objss)
 
 	if get_new_data:
 		for id in PROP_IDS: # data now is in two directories...ugh 
-			_retrieve_scan_data_ql(id, FILE_TYPE, DATA_DIR)
+			_retrieve_scan_data_astroquery(id, FILE_TYPE, DATA_DIR)
 
 	if sort_new_data:
-		print(os.path.join(DATA_DIR, 'new'))
 		sort_data_targname_filt(os.path.join(DATA_DIR, 'new'), 
 								os.path.join(DATA_DIR, 'data'),
 								file_type=FILE_TYPE,
@@ -247,8 +248,11 @@ def main_process_scan_UVIS(get_new_data=False, sort_new_data=False,
 
 				if len(cr_input) > 0:
 					print('{} new files to cr reject.'.format(len(cr_input)))
-					p = Pool(n_cores)
-					p.map(make_crcorr_file_scan_wfc3, cr_input)
+					# p = Pool(n_cores)
+					# p.map(make_crcorr_file_scan_wfc3, cr_input)
+					for f in cr_input:
+						print(f)
+						make_crcorr_file_scan_wfc3(f)
 				else:
 					print('All files already CR rejected.')
 
