@@ -1,10 +1,13 @@
-""" 
+"""
 
 	Runs all steps to generate photometry catalogs from UVIS spatial scan data.
 
 	Author
 	------
 	Clare Shanahan, 2018
+
+	UPDATED: Aug 2020, Clare Shanahan -- bug-fixes
+	UPDATED: Sept 2020, Debopam Som -- ease of use improvement, bug-fixes
 
 """
 
@@ -31,19 +34,42 @@ from pyql.database.ql_database_interface import UVIS_flt_0, UVIS_spt_0
 import warnings
 warnings.filterwarnings("ignore")
 
-###################################################################################### 
+######################################################################################
 ######  Set parameters here before running any of the functions in this module. ######
-###################################################################################### 
-DATA_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/data/scan_demo_data/' # directory that data should be sorted into 
-PHOT_TABLE_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/data/scan_demo_data/output/' # directory where catalogs should be output
-PROP_IDS = [15398] # list of proposal ids, used when downloading data.
+######################################################################################
+######################################################################################
+### ------------------------------ Set Paths -----------------------------------------
+DATA_DIR = '/Users/dsom/workarea/WFC3_projects/photometry/UVISscans/trials/trial_data' # directory that data should be sorted into
+PHOT_TABLE_DIR = '/Users/dsom/workarea/WFC3_projects/photometry/UVISscans/trials/trial_data/output' # directory where catalogs should be output
 PAM_DIR = '/grp/hst/wfc3p/cshanahan/phot_group_work/pixel_area_maps/' # directory containing pixel area maps
-AP_DIMENSIONS = [(36, 240)] # list of desired apertures (x dimension, y dimension) to use for aperture photometry 
-SKY_AP_DIMENSION = (75, 350) 
-BACK_METHOD = 'mean' # 'mean' or 'median'
-FILE_TYPE = 'flt' # file type (flt, flc, raw, etc..)
-###################################################################################### 
-###################################################################################### 
+### ----------------------------------------------------------------------------------
+### ---------------- Specify datasets and data-handling options ----------------------
+### ----------------------------------------------------------------------------------
+#PROP_IDS = [14878, 15398, 15583, 16021] # list of proposal ids, used when downloading data.
+PROP_IDS = [15398] # list of proposal ids, used when downloading data.
+NEWDAT = True # if True, look for new data from specified proposals and download.
+SORTDAT = True # if True, sort downloaded data else data remain in the 'new' directory.
+PROC_OBJS = 'all' # 'all' -or- object name -or- list of object names in the downloaded data to be processed.
+PROC_FILTS = 'all' # 'all' -or- filter name -or- list of filter names in the downloaded data to be processed.
+FILE_TYPE = 'flt' # input file type (flt, flc, raw, etc..) to be processed.
+### ----------------------------------------------------------------------------------
+### ----------------------- Specify analysis parameters ------------------------------
+### ----------------------------------------------------------------------------------
+CRREJ = True # if True, run CR rejection on input files.
+CRREPROC = False # if True, run all data through CR rejection process including already processed data.
+RUN_APPHOT = True # if True, run aperture photometry on data
+AP_DIMENSIONS = [(36, 240)] # list of desired aperture dimensions (x dimension, y dimension) to use for aperture photometry.
+SKY_AP_DIMENSION = (75, 350) # list of desired sky aperture dimensions (x dimension, y dimension) to use for aperture photometry.
+BACK_METHOD = 'mean' # background determination method: 'mean' or 'median'
+NCORES = 20 # specify number of processor cores to use
+SHOW_AP = False # if True, plot each aperture
+######################################################################################
+######################################################################################
+
+if CRREJ:
+	FTYPE_APPHOT = 'fcr'
+else:
+	FTYPE_APPHOT = FILE_TYPE
 
 def _setup_dirs():
 	""" Creates output directories in DATA_DIR, if they don't exist."""
@@ -59,16 +85,16 @@ def _get_existing_filenames(data_dir, fits_file_type):
     """Returns a list of roontames of already retrieved file that are in the
     sorted directory files, the 'bad' data directory and the 'new' data
     directory."""
- 
-    new_data_dir = data_dir + 'new/'
+
+    new_data_dir = os.path.join(data_dir, 'new/')
     new_data_files = glob.glob(new_data_dir+'*{}.fits'.format(fits_file_type))
     new_data_filenames = [os.path.basename(f) for f in new_data_files]
 
-    bad_data_dir = data_dir + 'bad/'
+    bad_data_dir = os.path.join(data_dir, 'bad/')
     bad_data_files = glob.glob(bad_data_dir+'*{}.fits'.format(fits_file_type))
     bad_data_filenames = [os.path.basename(f) for f in bad_data_files]
 
-    existing_data_dir = data_dir + 'data/'
+    existing_data_dir = os.path.join(data_dir, 'data/')
     existing_data_files = glob.glob(existing_data_dir + \
                          '*/*/*{}.fits'.format(fits_file_type))
     existing_data_filenames = [os.path.basename(f) for f in existing_data_files]
@@ -78,7 +104,7 @@ def _get_existing_filenames(data_dir, fits_file_type):
 def _retrieve_scan_data_astroquery(prop_id, fits_file_type, data_dir):
 
     """ Copies spatial scan files from quicklook directories to `data_dir`/new.
-        Only copies files that aren't sorted into a subdirectory in `data_dir` 
+        Only copies files that aren't sorted into a subdirectory in `data_dir`
         already. """
 
     print('Retrieving data from proposal {}'.format(str(prop_id)))
@@ -86,26 +112,27 @@ def _retrieve_scan_data_astroquery(prop_id, fits_file_type, data_dir):
     results = session.query(Master.rootname).join(UVIS_flt_0).join(UVIS_spt_0).\
               filter(UVIS_flt_0.proposid == prop_id).filter(UVIS_spt_0.scan_typ != 'N').all()
     all_scan_rootnames = [item[0] for item in results]
-    
+
     # now compare list against files already retrieved/sorted
     existing_filenames = [os.path.basename(x)[0:9] for x in _get_existing_filenames(data_dir, fits_file_type)]
-    
+
     # sometimes files have a 'j' or 's'. replace this with a q. i don't know why this is - failed obs?
-    new_file_rootnames =  [item[0:8] + 'q' for item in list(set(all_scan_rootnames) - set(existing_filenames))]
+#    new_file_rootnames = [item[0:8] + 'q' for item in list(set(all_scan_rootnames) - set(existing_filenames))]
+    new_file_rootnames = list(set(all_scan_rootnames) - set(existing_filenames))
     print(f'Found {len(new_file_rootnames)} un-ingested files in QL database.')
-    
+
     # query astroquery
     query_results = query_by_data_id(new_file_rootnames, file_type=fits_file_type)
-    
+
     print(f'Found {len(query_results)} results in Astroquery. Downloading.')
 
     # download data
-    download_products(query_results[0:5], output_dir=os.path.join(data_dir, 'new'))
+    download_products(query_results, output_dir=os.path.join(data_dir, 'new'))
 
 
 
-def get_header_info(hdr, keywords=['rootname', 'proposid', 'date-obs', 
-								   'expstart', 'exptime', 'ccdamp', 'aperture', 
+def get_header_info(hdr, keywords=['rootname', 'proposid', 'date-obs',
+								   'expstart', 'exptime', 'ccdamp', 'aperture',
 								   'flashlvl']):
 	header_info = []
 	for keyword in keywords:
@@ -133,7 +160,7 @@ def _wrapper_make_phot_table(input_files, show_ap_plot, data_ext):
 			pri_hdr = fits.open(f)[0].header
 			hdr = hdr + pri_hdr
 
-		phot_info_cols = ['rootname', 'proposid', 'date-obs', 'expstart', 
+		phot_info_cols = ['rootname', 'proposid', 'date-obs', 'expstart',
 						  'exptime', 'ccdamp', 'aperture', 'flashlvl']
 
 		phot_info = get_header_info(hdr, keywords=phot_info_cols)
@@ -148,18 +175,18 @@ def _wrapper_make_phot_table(input_files, show_ap_plot, data_ext):
 		print(theta)
 
 
-		print('Detected {} sources at {}, {}.'.format(len(source_tbl), x_pos, 
+		print('Detected {} sources at {}, {}.'.format(len(source_tbl), x_pos,
 			                                          y_pos))
 
 		print('Making PAM corrected image in memory.')
 		data = make_PAMcorr_image_UVIS(copy.deepcopy(data), hdr, hdr,
 			   PAM_DIR)
 
-		# divide by countrate 
+		# divide by countrate
 		data = data / hdr['EXPTIME']
 
-		back, back_rms = calc_sky(copy.deepcopy(data), x_pos, y_pos, 
-													SKY_AP_DIMENSION[1], 
+		back, back_rms = calc_sky(copy.deepcopy(data), x_pos, y_pos,
+													SKY_AP_DIMENSION[1],
 													SKY_AP_DIMENSION[0], 50,
 													method = BACK_METHOD)
 
@@ -182,10 +209,10 @@ def _wrapper_make_phot_table(input_files, show_ap_plot, data_ext):
 			ap_sum = phot_table['aperture_sum'][0]
 			print(f'*** Background subtracted countrate in {ap_size} is {ap_sum} ***')
 
-			# need to convert source sum to countrate for error calculation 
-			flux_err = compute_phot_err_daophot(ap_sum * hdr['EXPTIME'], 
+			# need to convert source sum to countrate for error calculation
+			flux_err = compute_phot_err_daophot(ap_sum * hdr['EXPTIME'],
 											    back * hdr['EXPTIME'],
-												back_rms * hdr['EXPTIME'], 
+												back_rms * hdr['EXPTIME'],
 												phot_ap_area, sky_ap_area)
 
 			flux_err = flux_err / hdr['EXPTIME']
@@ -208,41 +235,42 @@ def main_process_scan_UVIS(get_new_data=False, sort_new_data=True,
 						   run_ap_phot=True, ap_phot_file_type = 'fcr',
 						   n_cores=20, process_objs='all',
 						   process_filts='all', show_ap_plot=False):
-	
+
 	_setup_dirs()
 
-	objss = process_objs if type(process_objs) in [list, tuple] else [process_objs]
-	filtss = process_filts if type(process_filts) in [list, tuple] else [process_filts]
-
-	if process_objs == 'all':
-		objss=[os.path.basename(x) for x in glob.glob(DATA_DIR + '/data/*')]
-	if process_filts == 'all':
-		filtss=list(set([os.path.basename(x) for x in 
-					glob.glob(DATA_DIR + '/data/*/*')]))
-
 	if get_new_data:
-		for id in PROP_IDS: # data now is in two directories...ugh 
+		for id in PROP_IDS: # data now is in two directories...ugh
 			_retrieve_scan_data_astroquery(id, FILE_TYPE, DATA_DIR)
 
 	if sort_new_data:
-		sort_data_targname_filt(os.path.join(DATA_DIR, 'new'), 
+		sort_data_targname_filt(os.path.join(DATA_DIR, 'new'),
 								os.path.join(DATA_DIR, 'data'),
 								file_type=FILE_TYPE,
-								targname_mappings={'GD153' : 
+								targname_mappings={'GD153' :
 												  ['GD153', 'GD-153'],
-					 							  'GRW70' : ['GRW+70D5824', 
+					 							  'GRW70' : ['GRW+70D5824',
 					 							  'GRW+70D']})
+
+	if process_objs == 'all':
+		objss=[os.path.basename(x) for x in glob.glob(os.path.join(DATA_DIR, 'data/*'))]
+	else:
+		objss = process_objs if type(process_objs) in [list, tuple] else [process_objs]
+	if process_filts == 'all':
+		filtss=list(set([os.path.basename(x) for x in
+					glob.glob(os.path.join(DATA_DIR, 'data/*/*'))]))
+	else:
+		filtss = process_filts if type(process_filts) in [list, tuple] else [process_filts]
+
 	for objj in objss:
 		for filtt in filtss:
-			dirr = DATA_DIR + f'data/{objj}/{filtt}/'
+			dirr = os.path.join(DATA_DIR, f'data/{objj}/{filtt}/')
 
 			if run_cr_reject:
 				print(f'CR rejection {filtt}, {objj}')
-				cr_input = glob.glob(dirr+f'*{FILE_TYPE}.fits')
-				cr_input = glob.glob(DATA_DIR + f'data/{objj}/{filtt}/*{FILE_TYPE}.fits')
+				cr_input = glob.glob(dirr + f'*{FILE_TYPE}.fits')
 
 				if cr_reprocess is False:
-					existing_fcr = glob.glob(dirr+'/*fcr.fits')
+					existing_fcr = glob.glob(dirr + '*fcr.fits')
 					cr_input = [f for f in cr_input if f.replace(FILE_TYPE, 'fcr') not in \
 								existing_fcr]
 
@@ -271,16 +299,24 @@ def main_process_scan_UVIS(get_new_data=False, sort_new_data=True,
 				fcrs = glob.glob(dirr + f'/*{ap_phot_file_type}.fits')
 				print(f'{len(fcrs)} files for obj = {objj} filter = {filtt}.')
 
-				phot_table = _wrapper_make_phot_table(fcrs, 
+				phot_table = _wrapper_make_phot_table(fcrs,
 													  show_ap_plot=show_ap_plot,
 													  data_ext=data_ext)
 
-				output_path = PHOT_TABLE_DIR + '{}_{}_phot.dat'.format(objj, filtt)
+				if not os.path.isdir(PHOT_TABLE_DIR):
+					os.makedirs(PHOT_TABLE_DIR)
+					print(f'Making {PHOT_TABLE_DIR}')
+
+				output_path = os.path.join(PHOT_TABLE_DIR, '{}_{}_phot.dat'.format(objj, filtt))
+				print(output_path)
 				if os.path.isfile(output_path):
 					os.remove(output_path)
 				print(f'Writing {output_path}\n\n')
 				ascii.write(phot_table, output_path, format = 'csv')
 
 if __name__ == '__main__':
-	main_process_scan_UVIS(process_objs=['GD153'],
-						   process_filts='F218W')
+	main_process_scan_UVIS(get_new_data=NEWDAT, sort_new_data=SORTDAT,
+						   run_cr_reject=CRREJ, cr_reprocess=CRREPROC,
+						   run_ap_phot=RUN_APPHOT, ap_phot_file_type=FTYPE_APPHOT,
+						   n_cores=NCORES, process_objs=PROC_OBJS,
+						   process_filts=PROC_FILTS, show_ap_plot=SHOW_AP)
